@@ -4,6 +4,7 @@ add_plugin(hg hg.cpp)
 add_plugin(isotropic isotropic.cpp)
 add_plugin(blendphase blendphase.cpp)
 add_plugin(rayleigh rayleigh.cpp)
+add_plugin(mie mie.cpp)
 add_plugin(sggx sggx.cpp)
 add_plugin(tabphase tabphase.cpp)
 
