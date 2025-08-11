@@ -43,3 +43,24 @@ def test_bdpt_vs_path_integrator():
     assert bdpt_mean > 0.01  # Not too dark
     assert path_mean < 1.0   # Not oversaturated
     assert bdpt_mean < 1.0   # Not oversaturated
+
+def test_bdpt_different_max_depths():
+    """Test BDPT with different max depth settings"""
+    mi.set_variant('scalar_rgb')
+    
+    scene_description = mi.cornell_box()
+    scene_description['sensor']['film']['width'] = 16
+    scene_description['sensor']['film']['height'] = 16
+    
+    # Test different depths
+    for depth in [1, 2, 4, 8]:
+        scene_description['integrator'] = {'type': 'bdpt', 'max_depth': depth}
+        scene = mi.load_dict(scene_description)
+        img = mi.render(scene, spp=8)
+        
+        # Should render without crashing and produce some output
+        assert img is not None
+        assert img.shape == (16, 16, 3)
+        # For depth > 1, should have some non-zero values
+        if depth > 1:
+            assert dr.any(dr.neq(img.array, 0.0))
