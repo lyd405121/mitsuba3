@@ -156,8 +156,8 @@ public:
         /* Causes all texture coordinates to be vertically flipped. */
         bool flip_tex_coords = props.get<bool>("flip_tex_coords", false);
 
-        auto fs = Thread::thread()->file_resolver();
-        fs::path file_path = fs->resolve(props.string("filename"));
+        auto fs = file_resolver();
+        fs::path file_path = fs->resolve(props.get<std::string_view>("filename"));
         m_name = file_path.filename().string();
 
         auto fail = [&](const char *descr) {
@@ -276,7 +276,7 @@ public:
 
                     for (size_t j = 0; j < count; ++j) {
                         InputPoint3f p = dr::load<InputPoint3f>(target);
-                        p = m_to_world.scalar().transform_affine(p);
+                        p = m_to_world.scalar() * p;
                         if (unlikely(!all(dr::isfinite(p))))
                             fail("mesh contains invalid vertex position data");
                         m_bbox.expand(p);
@@ -286,7 +286,7 @@ public:
                         if (has_vertex_normals) {
                             InputNormal3f n = dr::load<InputNormal3f>(
                                 target + sizeof(InputFloat) * 3);
-                            n = dr::normalize(m_to_world.scalar().transform_affine(n));
+                            n = dr::normalize(m_to_world.scalar() * n);
                             dr::store(normal_ptr, n);
                             normal_ptr += 3;
                         }
@@ -436,9 +436,8 @@ public:
     }
 
 private:
-    MI_DECLARE_CLASS()
+    MI_DECLARE_CLASS(PLYMesh)
 };
 
-MI_IMPLEMENT_CLASS_VARIANT(PLYMesh, Mesh)
-MI_EXPORT_PLUGIN(PLYMesh, "PLY Mesh")
+MI_EXPORT_PLUGIN(PLYMesh)
 NAMESPACE_END(mitsuba)

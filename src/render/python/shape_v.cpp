@@ -10,8 +10,10 @@
 #include <mitsuba/python/python.h>
 #include <nanobind/trampoline.h>
 #include <nanobind/stl/string.h>
+#include <nanobind/stl/string_view.h>
 #include <nanobind/stl/vector.h>
 #include <nanobind/stl/tuple.h>
+#include <nanobind/stl/optional.h>
 #include <drjit/python.h>
 
 MI_PY_EXPORT(SilhouetteSample) {
@@ -36,8 +38,14 @@ MI_PY_EXPORT(SilhouetteSample) {
         .def_rw("offset",             &SilhouetteSample3f::offset,             D(SilhouetteSample, offset))
         // Methods
         .def("is_valid",  &SilhouetteSample3f::is_valid,  D(SilhouetteSample, is_valid))
-        .def("spawn_ray", &SilhouetteSample3f::spawn_ray,
-             "wavelengths"_a = dr::zeros<Wavelength>(), D(SilhouetteSample, spawn_ray))
+        .def("spawn_ray",
+             [](const SilhouetteSample3f& ss, const std::optional<Wavelength> wavelengths_) {
+                Wavelength wavelengths = wavelengths_.has_value() ?
+                                         wavelengths_.value() :
+                                         dr::zeros<Wavelength>();
+                return ss.spawn_ray(wavelengths);
+             },
+             "wavelengths"_a = nb::none(), D(SilhouetteSample, spawn_ray))
         .def_repr(SilhouetteSample3f);
 
     MI_PY_DRJIT_STRUCT(ss, SilhouetteSample3f, p, discontinuity_type, n, uv,
@@ -61,6 +69,8 @@ public:
     std::string to_string() const override {
         NB_OVERRIDE(to_string);
     }
+
+    DR_TRAMPOLINE_TRAVERSE_CB(Mesh)
 };
 
 template <typename Ptr, typename Cls> void bind_shape_generic(Cls &cls) {
@@ -225,7 +235,12 @@ template <typename Ptr, typename Cls> void bind_shape_generic(Cls &cls) {
             [](Ptr shape) {
                 return shape->surface_area();
             },
-            D(Shape, surface_area));
+            D(Shape, surface_area))
+       .def("has_flipped_normals",
+            [](Ptr shape) {
+                return shape->has_flipped_normals();
+            },
+            D(Shape, has_flipped_normals));
 }
 
 template <typename Ptr, typename Cls> void bind_mesh_generic(Cls &cls) {
@@ -273,7 +288,7 @@ template <typename Ptr, typename Cls> void bind_mesh_generic(Cls &cls) {
 
        .def("ray_intersect_triangle", [](const Ptr ptr, const UInt32 &index,
                                          const Ray3f &ray, Mask active) {
-                ptr->ray_intersect_triangle(index, ray, active);
+                return ptr->ray_intersect_triangle(index, ray, active);
             },
             "index"_a, "ray"_a, "active"_a = true,
             D(Mesh, ray_intersect_triangle));
@@ -281,8 +296,11 @@ template <typename Ptr, typename Cls> void bind_mesh_generic(Cls &cls) {
     if constexpr (dr::is_array_v<Ptr> && dr::is_jit_v<Ptr>) {
         // Custom constructor to automatically zero-out non-Mesh pointer entries.
         // using ShapePtr = dr::replace_scalar_t<Ptr, Shape *>;
-        cls
-            .def("__init__", [](Ptr *dst, const ShapePtr &ptr) {
+        cls.def("__init__", [](Ptr *dst) {
+               // Zero-sized pointer array.
+               new (dst) Ptr();
+           })
+           .def("__init__", [](Ptr *dst, const ShapePtr &ptr) {
                 ShapePtr filtered = dr::select(ptr->is_mesh(), ptr, dr::zeros<ShapePtr>());
                 Ptr mesh = dr::reinterpret_array<Ptr>(filtered);
                 // Placement new.
@@ -293,7 +311,10 @@ template <typename Ptr, typename Cls> void bind_mesh_generic(Cls &cls) {
             })
             .def("__init__", [](Ptr *dst, const Mesh *ptr) {
                 new (dst) Ptr(ptr);
-            });
+            })
+            .def("has_flipped_normals", [](Ptr shape) {
+                return shape->has_flipped_normals();
+            }, D(Shape, has_flipped_normals));
     }
 }
 
@@ -308,16 +329,17 @@ MI_PY_EXPORT(Shape) {
         .def("bbox", nb::overload_cast<ScalarUInt32, const ScalarBoundingBox3f &>(
             &Shape::bbox, nb::const_), D(Shape, bbox, 3), "index"_a, "clip"_a)
         .def_method(Shape, add_texture_attribute, "name"_a, "texture"_a)
-        .def("texture_attribute", nb::overload_cast<const std::string &>(
+        .def("texture_attribute", nb::overload_cast<std::string_view>(
             &Shape::texture_attribute), D(Shape, texture_attribute), "name"_a)
         .def_method(Shape, remove_attribute, "name"_a)
-        .def_method(Shape, id)
         .def_method(Shape, is_mesh)
         .def_method(Shape, parameters_grad_enabled)
         .def_method(Shape, set_bsdf, "bsdf"_a)
         .def_method(Shape, primitive_count)
         .def_method(Shape, effective_primitive_count)
         .def_method(Shape, precompute_silhouette, "viewpoint"_a);
+
+    drjit::bind_traverse(shape);
 
     bind_shape_generic<Shape *>(shape);
 
@@ -329,7 +351,6 @@ MI_PY_EXPORT(Shape) {
 
     using PyMesh = PyMesh<Float, Spectrum>;
     using ScalarSize = typename Mesh::ScalarSize;
-    using Properties = PropertiesV<Float>;
     auto mesh_cls = MI_PY_TRAMPOLINE_CLASS(PyMesh, Mesh, Shape)
         .def(nb::init<const Properties&>(), "props"_a)
         .def(nb::init<const std::string &, ScalarSize, ScalarSize,
@@ -372,5 +393,5 @@ MI_PY_EXPORT(Shape) {
         bind_mesh_generic<MeshPtr>(mesh_ptr);
     }
 
-    MI_PY_REGISTER_OBJECT("register_mesh", Mesh)
+    drjit::bind_traverse(mesh_cls);
 }

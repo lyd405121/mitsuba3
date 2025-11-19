@@ -1,5 +1,6 @@
 #pragma once
 
+#include <mitsuba/render/bsdf.h>
 #include <drjit/call.h>
 #include <mitsuba/render/records.h>
 #include <mitsuba/core/spectrum.h>
@@ -7,7 +8,7 @@
 #include <mitsuba/core/bbox.h>
 #include <mitsuba/core/field.h>
 #include <drjit/packet.h>
-#include <unordered_map>
+#include <tsl/robin_map.h>
 
 #if defined(MI_ENABLE_CUDA)
 #  include <mitsuba/render/optix/common.h>
@@ -49,6 +50,9 @@ enum class ShapeType : uint32_t {
 
     /// Instance (`instance`)
     Instance = 1u << 10,
+
+    /// ShapeGroup (`shapegroup`)
+    ShapeGroup = 1u << 11,
 
     /// Invalid for default initialization
     Invalid = 0
@@ -199,7 +203,7 @@ struct SilhouetteSample : public PositionSample<Float_, Spectrum_> {
           d(0), silhouette_d(0), prim_index(0), scene_index(0), flags(0),
           projection_index(0), shape(nullptr), foreshortening(0), offset(0) {}
 
-    /// Is the current boundary segment valid=
+    /// Is the current boundary segment valid?
     Mask is_valid() const {
         return discontinuity_type != (uint32_t) DiscontinuityFlags::Empty;
     }
@@ -207,8 +211,8 @@ struct SilhouetteSample : public PositionSample<Float_, Spectrum_> {
     /**
      * \brief Spawn a ray on the silhouette point in the direction of \ref d
      *
-     * The ray origin is offset in the direction of the segment (\ref d) aswell
-     * as in the in the direction of the silhouette normal (\ref n). Without this
+     * The ray origin is offset in the direction of the segment (\ref d) as well
+     * as in the direction of the silhouette normal (\ref n). Without this
      * offsetting, during a ray intersection, the ray could potentially find
      * an intersection point at its origin due to numerical instabilities in
      * the intersection routines.
@@ -247,7 +251,7 @@ struct SilhouetteSample : public PositionSample<Float_, Spectrum_> {
  * methods.
  */
 template <typename Float, typename Spectrum>
-class MI_EXPORT_LIB Shape : public Object {
+class MI_EXPORT_LIB Shape : public JitObject<Shape<Float, Spectrum>> {
 public:
     MI_IMPORT_TYPES(BSDF, Medium, Emitter, Sensor, MeshAttribute, Texture)
 
@@ -500,7 +504,7 @@ public:
     precompute_silhouette(const ScalarPoint3f &viewpoint) const;
 
     /**
-     * \brief Samples a boundary segement on the shape's silhouette using
+     * \brief Samples a boundary segment on the shape's silhouette using
      * precomputed information computed in \ref precompute_silhouette.
      *
      * This method is meant to be used for silhouettes that are shared between
@@ -544,7 +548,7 @@ public:
      *
      * If the intersection is deemed relevant (e.g. the closest to the ray
      * origin), detailed intersection information can later be obtained via the
-     * \ref create_surface_interaction() method.
+     * \ref compute_surface_interaction() method.
      *
      * \param ray
      *     The ray to be tested for an intersection
@@ -721,20 +725,20 @@ public:
      *     Texture to store. The dimensionality of the attribute
      *     is simply the channel count of the texture.
      */
-    virtual void add_texture_attribute(const std::string &name, Texture *texture);
+    virtual void add_texture_attribute(std::string_view name, Texture *texture);
 
     /// Return the texture attribute associated with \c name.
-    Texture *texture_attribute(const std::string &name);
+    Texture *texture_attribute(std::string_view name);
 
     /// Return the texture attribute associated with \c name.
-    const Texture *texture_attribute(const std::string &name) const;
+    const Texture *texture_attribute(std::string_view name) const;
 
     /**
      * \brief Remove a texture texture with the given \c name.
      *
      * Throws an exception if the attribute was not registered.
      */
-    virtual void remove_attribute(const std::string &name);
+    virtual void remove_attribute(std::string_view name);
 
     /**
      * \brief Returns whether this shape contains the specified attribute.
@@ -742,7 +746,7 @@ public:
      * \param name
      *     Name of the attribute
      */
-    virtual Mask has_attribute(const std::string &name, Mask active = true) const;
+    virtual Mask has_attribute(std::string_view name, Mask active = true) const;
 
     /**
      * \brief Evaluate a specific shape attribute at the given surface interaction.
@@ -760,7 +764,7 @@ public:
      * \return
      *     An unpolarized spectral power distribution or reflectance value
      */
-    virtual UnpolarizedSpectrum eval_attribute(const std::string &name,
+    virtual UnpolarizedSpectrum eval_attribute(std::string_view name,
                                                const SurfaceInteraction3f &si,
                                                Mask active = true) const;
 
@@ -780,7 +784,7 @@ public:
      * \return
      *     An scalar intensity or reflectance value
      */
-    virtual Float eval_attribute_1(const std::string &name,
+    virtual Float eval_attribute_1(std::string_view name,
                                    const SurfaceInteraction3f &si,
                                    Mask active = true) const;
 
@@ -798,9 +802,9 @@ public:
      *     Surface interaction associated with the query
      *
      * \return
-     *     An trichromatic intensity or reflectance value
+     *     A trichromatic intensity or reflectance value
      */
-    virtual Color3f eval_attribute_3(const std::string &name,
+    virtual Color3f eval_attribute_3(std::string_view name,
                                      const SurfaceInteraction3f &si,
                                      Mask active = true) const;
 
@@ -814,9 +818,9 @@ public:
      *     Surface interaction associated with the query
      *
      * \return
-     *     An dynamic array of attribute values
+     *     A dynamic array of attribute values
      */
-    virtual dr::DynamicArray<Float> eval_attribute_x(const std::string &name,
+    virtual dr::DynamicArray<Float> eval_attribute_x(std::string_view name,
                                                      const SurfaceInteraction3f &si,
                                                      Mask active = true) const;
 
@@ -839,12 +843,6 @@ public:
     //! @{ \name Miscellaneous
     // =============================================================
 
-    /// Return a string identifier
-    std::string id() const override { return m_id; }
-
-    /// Set a string identifier
-    void set_id(const std::string& id) override { m_id = id; };
-
     /// Is this shape a triangle mesh?
     bool is_mesh() const { return shape_type() & ShapeType::Mesh; }
 
@@ -858,8 +856,8 @@ public:
     /// Returns the shape type \ref ShapeType of this shape
     uint32_t shape_type() const { return (uint32_t) m_shape_type; }
 
-    /// Is this shape a shapegroup?
-    bool is_shapegroup() const { return class_()->name() == "ShapeGroupPlugin"; };
+    /// Is this shape a shape group?
+    bool is_shape_group() const { return (shape_type() == +ShapeType::ShapeGroup); };
 
     /// Is this shape an instance?
     bool is_instance() const { return shape_type() == +ShapeType::Instance; };
@@ -916,6 +914,9 @@ public:
      * the same value as \ref primitive_count().
      */
     virtual ScalarSize effective_primitive_count() const;
+
+    /// Does this shape have flipped normals?
+    virtual bool has_flipped_normals() const;
 
 
 #if defined(MI_ENABLE_EMBREE)
@@ -979,7 +980,7 @@ public:
     virtual void optix_prepare_ias(const OptixDeviceContext& /*context*/,
                                    std::vector<OptixInstance>& /*out_instances*/,
                                    uint32_t /*instance_id*/,
-                                   const ScalarTransform4f& /*transf*/);
+                                   const ScalarAffineTransform4f& /*transf*/);
 
     /**
      * \brief Creates and appends the HitGroupSbtRecord(s) associated with this
@@ -1032,11 +1033,11 @@ public:
     //! @}
     // =============================================================
 
-    MI_DECLARE_CLASS()
+    MI_DECLARE_PLUGIN_BASE_CLASS(Shape)
 
 protected:
     Shape(const Properties &props);
-    inline Shape() { }
+    inline Shape() : JitObject<Shape>("") { }
 
 protected:
     virtual void initialize();
@@ -1047,17 +1048,16 @@ protected:
     ref<Sensor> m_sensor;
     ref<Medium> m_interior_medium;
     ref<Medium> m_exterior_medium;
-    std::string m_id;
     ShapeType m_shape_type = ShapeType::Invalid;
 
     uint32_t m_discontinuity_types = (uint32_t) DiscontinuityFlags::Empty;
     /// Sampling weight (proportional to scene)
     float m_silhouette_sampling_weight;
 
-    std::unordered_map<std::string, ref<Texture>> m_texture_attributes;
+    tsl::robin_map<std::string, ref<Texture>, std::hash<std::string_view>,
+                   std::equal_to<>> m_texture_attributes;
 
-    field<Transform4f, ScalarTransform4f> m_to_world;
-    field<Transform4f, ScalarTransform4f> m_to_object;
+    field<AffineTransform4f, ScalarAffineTransform4f> m_to_world;
 
     /// True if the shape is used in a \c ShapeGroup
     bool m_is_instance = false;
@@ -1071,8 +1071,11 @@ protected:
     /// True if the shape's geometry has changed
     bool m_dirty = true;
 
-    /// True if the shape has called iniatlize() at least once
+    /// True if the shape has called initialize() at least once
     bool m_initialized = false;
+
+    MI_DECLARE_TRAVERSE_CB(m_bsdf, m_emitter, m_sensor, m_interior_medium,
+                           m_exterior_medium, m_texture_attributes, m_to_world)
 };
 
 // -----------------------------------------------------------------------
@@ -1160,10 +1163,10 @@ NAMESPACE_END(mitsuba)
     MI_IMPLEMENT_RAY_INTERSECT_PACKET(16)
 
 // -----------------------------------------------------------------------
-//! @{ \name Dr.Jit support for vectorized function calls
+//! @{ \name Enables vectorized method calls on Dr.Jit arrays of shapes
 // -----------------------------------------------------------------------
 
-MI_CALL_TEMPLATE_BEGIN(Shape)
+DRJIT_CALL_TEMPLATE_BEGIN(mitsuba::Shape)
     DRJIT_CALL_METHOD(compute_surface_interaction)
     DRJIT_CALL_METHOD(has_attribute)
     DRJIT_CALL_METHOD(eval_attribute)
@@ -1191,11 +1194,13 @@ MI_CALL_TEMPLATE_BEGIN(Shape)
     DRJIT_CALL_GETTER(exterior_medium)
     DRJIT_CALL_GETTER(silhouette_discontinuity_types)
     DRJIT_CALL_GETTER(silhouette_sampling_weight)
+    DRJIT_CALL_GETTER(has_flipped_normals)
     DRJIT_CALL_GETTER(shape_type)
     auto is_emitter() const { return emitter() != nullptr; }
     auto is_sensor() const { return sensor() != nullptr; }
     auto is_mesh() const { return (shape_type() & +mitsuba::ShapeType::Mesh) != 0; }
-    auto is_ellipsoids() const { 
+    auto is_shape_group() const { return shape_type() == +mitsuba::ShapeType::ShapeGroup; }
+    auto is_ellipsoids() const {
         auto st = shape_type();
         st &= ~mitsuba::ShapeType::Mesh;
         return ((st & (uint32_t) mitsuba::ShapeType::Ellipsoids) |
@@ -1203,7 +1208,7 @@ MI_CALL_TEMPLATE_BEGIN(Shape)
     }
     auto is_medium_transition() const { return interior_medium() != nullptr ||
                                                exterior_medium() != nullptr; }
-MI_CALL_TEMPLATE_END(Shape)
+DRJIT_CALL_END()
 
 //! @}
 // -----------------------------------------------------------------------

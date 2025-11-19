@@ -17,7 +17,7 @@ NAMESPACE_BEGIN(mitsuba)
 template <typename Float, typename Spectrum>
 class MI_EXPORT_LIB ShapeGroup : public Shape<Float, Spectrum> {
 public:
-    MI_IMPORT_BASE(Shape, m_id, m_dirty)
+    MI_IMPORT_BASE(Shape, m_dirty)
     MI_IMPORT_TYPES(ShapeKDTree, ShapePtr)
 
     using typename Base::ScalarSize;
@@ -61,7 +61,7 @@ public:
     void optix_prepare_ias(const OptixDeviceContext& context,
                            std::vector<OptixInstance>& instances,
                            uint32_t instance_id,
-                           const ScalarTransform4f& transf) override;
+                           const ScalarAffineTransform4f& transf) override;
 
     void optix_fill_hitgroup_records(
         std::vector<HitGroupSbtRecord> &hitgroup_records,
@@ -74,7 +74,7 @@ public:
     void optix_build_gas(const OptixDeviceContext& context);
 #endif
 
-    MI_DECLARE_CLASS()
+    MI_DECLARE_CLASS(ShapeGroup)
 private:
     ScalarBoundingBox3f m_bbox;
     std::vector<ref<Base>> m_shapes;
@@ -97,6 +97,10 @@ private:
 #endif
 
     uint32_t m_shape_types;
+
+    std::vector<UInt64> m_accel_handles;
+
+    MI_DECLARE_TRAVERSE_CB(m_shapes, m_shapes_registry_ids, m_accel_handles)
 };
 
 MI_EXTERN_CLASS(ShapeGroup)

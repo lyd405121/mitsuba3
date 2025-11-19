@@ -2,6 +2,7 @@
 #include <cstring>
 #include <cstdio>
 #include <mutex>
+#include <functional>
 
 #include <drjit-core/optix.h>
 
@@ -15,10 +16,6 @@
 #include "librender_ptx.h"
 
 NAMESPACE_BEGIN(mitsuba)
-
-#if !defined(NDEBUG) || defined(MI_ENABLE_OPTIX_DEBUG_VALIDATION)
-#  define MI_ENABLE_OPTIX_DEBUG_VALIDATION_ON
-#endif
 
 // Per scene OptiX state data structure
 struct MiOptixSceneState {
@@ -91,13 +88,14 @@ const MiOptixConfig &init_optix_config(uint32_t shape_types) {
 
     OptixModuleCompileOptions module_compile_options { };
     module_compile_options.maxRegisterCount = OPTIX_COMPILE_DEFAULT_MAX_REGISTER_COUNT;
-#if !defined(MI_ENABLE_OPTIX_DEBUG_VALIDATION_ON)
-    module_compile_options.optLevel         = OPTIX_COMPILE_OPTIMIZATION_DEFAULT;
-    module_compile_options.debugLevel       = OPTIX_COMPILE_DEBUG_LEVEL_NONE;
-#else
-    module_compile_options.optLevel         = OPTIX_COMPILE_OPTIMIZATION_LEVEL_0;
-    module_compile_options.debugLevel       = OPTIX_COMPILE_DEBUG_LEVEL_FULL;
-#endif
+
+    if (jit_flag(JitFlag::Debug)) {
+        module_compile_options.optLevel   = OPTIX_COMPILE_OPTIMIZATION_LEVEL_0;
+        module_compile_options.debugLevel = OPTIX_COMPILE_DEBUG_LEVEL_FULL;
+    } else {
+        module_compile_options.optLevel   = OPTIX_COMPILE_OPTIMIZATION_DEFAULT;
+        module_compile_options.debugLevel = OPTIX_COMPILE_DEBUG_LEVEL_NONE;
+    }
 
     config.pipeline_compile_options.usesMotionBlur     = false;
     config.pipeline_compile_options.numPayloadValues   = 0;
@@ -106,15 +104,13 @@ const MiOptixConfig &init_optix_config(uint32_t shape_types) {
     config.pipeline_compile_options.traversableGraphFlags =
         OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_LEVEL_INSTANCING;
 
-#if !defined(MI_ENABLE_OPTIX_DEBUG_VALIDATION_ON)
-    config.pipeline_compile_options.exceptionFlags =
-            OPTIX_EXCEPTION_FLAG_NONE;
-#else
-    config.pipeline_compile_options.exceptionFlags =
-            OPTIX_EXCEPTION_FLAG_DEBUG |
+    if (jit_flag(JitFlag::Debug))
+        config.pipeline_compile_options.exceptionFlags =
             OPTIX_EXCEPTION_FLAG_TRACE_DEPTH |
             OPTIX_EXCEPTION_FLAG_STACK_OVERFLOW;
-#endif
+    else
+        config.pipeline_compile_options.exceptionFlags =
+            OPTIX_EXCEPTION_FLAG_NONE;
 
     // Compute flags informing OptiX of the present shape types
     unsigned int prim_flags = 0, st = shape_types;
@@ -320,7 +316,6 @@ const MiOptixConfig &init_optix_config(uint32_t shape_types) {
 }
 
 MI_VARIANT void Scene<Float, Spectrum>::accel_init_gpu(const Properties &props) {
-    DRJIT_MARK_USED(props);
     if constexpr (!dr::is_cuda_v<Float>)
         return;
 
@@ -334,8 +329,8 @@ MI_VARIANT void Scene<Float, Spectrum>::accel_init_gpu(const Properties &props) 
 
     // Check if another scene was passed to the constructor
     Scene *other_scene = nullptr;
-    for (auto &[k, v] : props.objects()) {
-        other_scene = dynamic_cast<Scene *>(v.get());
+    for (auto &prop : props.objects()) {
+        other_scene = prop.try_get<Scene>();
         if (other_scene)
             break;
     }
@@ -469,7 +464,7 @@ MI_VARIANT void Scene<Float, Spectrum>::accel_parameters_changed_gpu() {
 
             // Gather information about the instance acceleration structure to be built
             std::vector<OptixInstance> ias;
-            prepare_ias(s.context, m_shapes, 0, s.accel, 0u, ScalarTransform4f(), ias);
+            prepare_ias(s.context, m_shapes, 0, s.accel, 0u, ScalarAffineTransform4f(), ias);
 
             // Build a "master" IAS that contains all the GAS of the scene (meshes,
             // custom shapes, curves, ...)
@@ -595,6 +590,9 @@ MI_VARIANT void Scene<Float, Spectrum>::static_accel_shutdown_gpu() {
 
 MI_VARIANT typename Scene<Float, Spectrum>::PreliminaryIntersection3f
 Scene<Float, Spectrum>::ray_intersect_preliminary_gpu(const Ray3f &ray,
+                                                      bool reorder,
+                                                      UInt32 reorder_hint,
+                                                      uint32_t reorder_hint_bits,
                                                       Mask active) const {
     if constexpr (dr::is_cuda_v<Float>) {
         MiOptixSceneState &s = *(MiOptixSceneState *) m_accel;
@@ -638,10 +636,14 @@ Scene<Float, Spectrum>::ray_intersect_preliminary_gpu(const Ray3f &ray,
         };
         uint32_t hitobject_out[7];
 
+        // Scene property takes precedence
+        reorder &= m_thread_reordering;
+
         jit_optix_ray_trace(sizeof(trace_args) / sizeof(uint32_t), trace_args,
-                            has_instances ? 7 : 6, fields, hitobject_out, false,
-                            active.index(), s.pipeline_jit_index,
-                            s.sbt_jit_index);
+                            has_instances ? 7 : 6, fields, hitobject_out,
+                            reorder, reorder_hint.index(), reorder_hint_bits,
+                            false, active.index(),
+                            s.pipeline_jit_index, s.sbt_jit_index);
 
         Mask hitobject_is_hit = UInt32::steal(hitobject_out[0]) != 0;
         active &= hitobject_is_hit;
@@ -662,17 +664,20 @@ Scene<Float, Spectrum>::ray_intersect_preliminary_gpu(const Ray3f &ray,
         // This field is only used by embree, but we still need to initialize it for vcalls
         pi.shape_index = dr::zeros<UInt32>();
 
-        // jit_optix_ray_trace leaves payload data uninitialized for inactive lanes
+        // jit_optix_ray_trace leaves data uninitialized for inactive lanes
         pi.t[!active] = dr::Infinity<Float>;
-
-        // Ensure pointers are initialized to nullptr for inactive lanes
         active &= pi.is_valid();
         pi.shape[!active]    = nullptr;
         pi.instance[!active] = nullptr;
+        pi.prim_uv[!active] = dr::zeros<Point2f>();
+        pi.prim_index[!active] = 0;
 
         return pi;
     } else {
         DRJIT_MARK_USED(ray);
+        DRJIT_MARK_USED(reorder);
+        DRJIT_MARK_USED(reorder_hint);
+        DRJIT_MARK_USED(reorder_hint_bits);
         DRJIT_MARK_USED(active);
         Throw("ray_intersect_gpu() should only be called in GPU mode.");
     }
@@ -680,13 +685,19 @@ Scene<Float, Spectrum>::ray_intersect_preliminary_gpu(const Ray3f &ray,
 
 MI_VARIANT typename Scene<Float, Spectrum>::SurfaceInteraction3f
 Scene<Float, Spectrum>::ray_intersect_gpu(const Ray3f &ray, uint32_t ray_flags,
+                                          bool reorder, UInt32 reorder_hint,
+                                          uint32_t reorder_hint_bits,
                                           Mask active) const {
     if constexpr (dr::is_cuda_v<Float>) {
-        PreliminaryIntersection3f pi = ray_intersect_preliminary_gpu(ray, active);
+        PreliminaryIntersection3f pi = ray_intersect_preliminary_gpu(
+            ray, reorder, reorder_hint, reorder_hint_bits, active);
         return pi.compute_surface_interaction(ray, ray_flags, active);
     } else {
         DRJIT_MARK_USED(ray);
         DRJIT_MARK_USED(ray_flags);
+        DRJIT_MARK_USED(reorder);
+        DRJIT_MARK_USED(reorder_hint);
+        DRJIT_MARK_USED(reorder_hint_bits);
         DRJIT_MARK_USED(active);
         Throw("ray_intersect_gpu() should only be called in GPU mode.");
     }
@@ -729,9 +740,9 @@ Scene<Float, Spectrum>::ray_test_gpu(const Ray3f &ray, Mask active) const {
         uint32_t hitobject_out;
 
         jit_optix_ray_trace(sizeof(trace_args) / sizeof(uint32_t), trace_args,
-                                1, &field, &hitobject_out,
-                                false, active.index(),
-                                s.pipeline_jit_index, s.sbt_jit_index);
+                            1, &field, &hitobject_out,
+                            false, 0, 0, false, active.index(),
+                            s.pipeline_jit_index, s.sbt_jit_index);
 
         UInt32 hitobject_is_hit = UInt32::steal(hitobject_out);
 

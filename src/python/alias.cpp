@@ -68,7 +68,7 @@ nb::object import_with_deepbind_if_necessary(const char* name) {
 
 #if defined(__clang__) && !defined(__APPLE__)
     if (!std::getenv("DRJIT_NO_RTLD_DEEPBIND"))
-        sys.attr("setdlopenflags")(sys.attr("getdlopenflags")());
+        sys.attr("setdlopenflags")(backupflags);
 #endif
 
     return out;
@@ -200,14 +200,25 @@ static void clear_variant_callbacks() {
     nb::borrow<nb::set>(variant_change_callbacks).clear();
 }
 
-
 /// Fallback for when we're attempting to fetch variant-specific attribute
 static nb::object get_attr(nb::handle key) {
     if (PyDict_Contains(variant_modules, key.ptr()) == 1)
         return variant_module(key);
 
-    throw nb::attribute_error(
-        nb::str("module 'mitsuba' has no attribute '{}'").format(key).c_str());
+    // If no variant is set, inform the user
+    if (curr_variant.is_none() && PyUnicode_Check(key.ptr())) {
+        const char* attr_name = PyUnicode_AsUTF8(key.ptr());
+        if (attr_name) {
+            return nb::steal(PyErr_Format(PyExc_AttributeError,
+                "Cannot access '%s' before setting a variant. "
+                "Please call `mitsuba.set_variant('variant_name')` first. "
+                "For example: mitsuba.set_variant('scalar_rgb') or mitsuba.set_variant('cuda_ad_rgb'). "
+                "Use mitsuba.variants() to see all available variants.",
+                attr_name));
+        }
+    }
+
+    return nb::steal(PyErr_Format(PyExc_AttributeError, "Module 'mitsuba' has no attribute %R", key.ptr()));
 }
 
 NB_MODULE(mitsuba_alias, m) {
@@ -217,17 +228,16 @@ NB_MODULE(mitsuba_alias, m) {
     curr_variant = nb::none();
     variant_change_callbacks = nb::set();
 
-    if (!variant_modules) {
+    if (!variant_modules)
         variant_modules = PyDict_New();
-    }
 
     // Need to populate `__path__` we do it by using the `__file__` attribute
     // of a Python file which is located in the same directory as this module
-    nb::module_ os = nb::module_::import_("os");
+    nb::module_ path = nb::module_::import_("os").attr("path");
     nb::module_ cfg = nb::module_::import_("mitsuba.config");
-    nb::object cfg_path = os.attr("path").attr("realpath")(cfg.attr("__file__"));
-    nb::object mi_dir = os.attr("path").attr("dirname")(cfg_path);
-    nb::object mi_py_dir = os.attr("path").attr("join")(mi_dir, "python");
+    nb::object cfg_path = path.attr("realpath")(cfg.attr("__file__"));
+    nb::object mi_dir = path.attr("dirname")(cfg_path);
+    nb::object mi_py_dir = path.attr("join")(mi_dir, "python");
     nb::list paths{};
     paths.append(nb::str(mi_dir));
     paths.append(nb::str(mi_py_dir));
@@ -246,17 +256,21 @@ NB_MODULE(mitsuba_alias, m) {
             all_variant_names[i].ptr(), nb::none().ptr());
     }
 
-    m.def("variant", []() { return curr_variant ? curr_variant : nb::none(); });
-    m.def("variants", []() { return nb::steal(PyDict_Keys(variant_modules)); });
-    m.def("set_variant", set_variant);
+    m.def("variant", []() { return curr_variant ? curr_variant : nb::none(); },
+          nb::sig("def variant() -> typing.Optional[str]"));
+    m.def("variants", []() { return nb::steal(PyDict_Keys(variant_modules)); },
+          nb::sig("def variants() -> typing.List[str]"));
+    m.def("set_variant", set_variant,
+          nb::sig("def set_variant(*args: str) -> None"));
     /// Only used for variant-specific attributes e.g. mi.scalar_rgb.T
     m.def("__getattr__", [](nb::handle key) { return get_attr(key); });
 
-    // `mitsuba.detail` submodule
-    nb::module_ mi_detail = m.def_submodule("detail");
+    // Create the detail submodule
+    nb::module_ mi_detail = nb::module_::import_("mitsuba.detail");
     mi_detail.def("add_variant_callback", add_variant_callback);
     mi_detail.def("remove_variant_callback", remove_variant_callback);
     mi_detail.def("clear_variant_callbacks", clear_variant_callbacks);
+    m.attr("detail") = mi_detail;
 
     /// Fill `__dict__` with all objects in `mitsuba_ext` and `mitsuba.python`
     mi_dict = m.attr("__dict__").ptr();

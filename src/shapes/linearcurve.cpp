@@ -105,18 +105,18 @@ points and increasing radii::
 
         'curves': {
             'type': 'linearcurve',
-            'to_world': mi.ScalarTransform4f().scale([2, 2, 2]).translate([1, 0, 0]),
+            'to_world': mi.ScalarAffineTransform4f().scale([2, 2, 2]).translate([1, 0, 0]),
             'filename': 'curves.txt'
         },
 
-.. note:: The backfaces of the curves are culled. It is therefore impossible to
-          intersect the curve with a ray that's origin is inside of the curve.
- */
+.. note:: The backfaces of curves are always culled. It is therefore impossible
+          to intersect the curve with a ray that's origin is inside of the curve.
+*/
 
 template <typename Float, typename Spectrum>
 class LinearCurve final : public Shape<Float, Spectrum> {
 public:
-    MI_IMPORT_BASE(Shape, m_to_world, m_to_object, m_is_instance, m_shape_type,
+    MI_IMPORT_BASE(Shape, m_to_world, m_is_instance, m_shape_type,
                    initialize, mark_dirty, get_children_string,
                    parameters_grad_enabled)
     MI_IMPORT_TYPES()
@@ -138,8 +138,8 @@ public:
                   "variants!");
 #endif
 
-        auto fs = Thread::thread()->file_resolver();
-        fs::path file_path = fs->resolve(props.string("filename"));
+        auto fs = file_resolver();
+        fs::path file_path = fs->resolve(props.get<std::string_view>("filename"));
         std::string m_name = file_path.filename().string();
 
         // used for throwing an error later
@@ -221,7 +221,7 @@ public:
                 p[i] = string::strtof<InputFloat>(cur, (char **) &cur);
                 parse_error |= cur == orig;
             }
-            p = m_to_world.scalar().transform_affine(p);
+            p = m_to_world.scalar() * p;
 
             // Vertex radius
             InputFloat r;
@@ -368,11 +368,11 @@ public:
         return si;
     }
 
-    void traverse(TraversalCallback *callback) override {
-        Base::traverse(callback);
-        callback->put_parameter("control_point_count", m_control_point_count, +ParamFlags::NonDifferentiable);
-        callback->put_parameter("segment_indices",     m_indices,             +ParamFlags::NonDifferentiable);
-        callback->put_parameter("control_points",      m_control_points,      +ParamFlags::NonDifferentiable);
+    void traverse(TraversalCallback *cb) override {
+        Base::traverse(cb);
+        cb->put("control_point_count", m_control_point_count, ParamFlags::NonDifferentiable);
+        cb->put("segment_indices",     m_indices,             ParamFlags::NonDifferentiable);
+        cb->put("control_points",      m_control_points,      ParamFlags::NonDifferentiable);
     }
 
     void parameters_changed(const std::vector<std::string> &keys) override {
@@ -446,7 +446,7 @@ public:
         return oss.str();
     }
 
-    MI_DECLARE_CLASS()
+    MI_DECLARE_CLASS(LinearCurve)
 
 private:
     template <bool Negate, ScalarSize N>
@@ -514,8 +514,9 @@ private:
     mutable void* m_vertex_buffer_ptr = nullptr;
     mutable void* m_radius_buffer_ptr = nullptr;
 #endif
+
+    MI_TRAVERSE_CB(Base, m_indices, m_control_points)
 };
 
-MI_IMPLEMENT_CLASS_VARIANT(LinearCurve, Shape)
-MI_EXPORT_PLUGIN(LinearCurve, "Linear curve intersection primitive");
+MI_EXPORT_PLUGIN(LinearCurve)
 NAMESPACE_END(mitsuba)

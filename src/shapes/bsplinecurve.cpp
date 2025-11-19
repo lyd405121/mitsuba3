@@ -115,10 +115,13 @@ points and increasing radii::
 
         'curves': {
             'type': 'bsplinecurve',
-            'to_world': mi.ScalarTransform4f().translate([1, 0, 0]).scale([2, 2, 2]),
+            'to_world': mi.ScalarAffineTransform4f().translate([1, 0, 0]).scale([2, 2, 2]),
             'filename': 'curves.txt'
         }
- */
+
+.. note:: The backfaces of curves are always culled. It is therefore impossible
+          to intersect the curve with a ray that's origin is inside of the curve.
+*/
 
 template <typename Float, typename Spectrum>
 class BSplineCurve final : public Shape<Float, Spectrum> {
@@ -144,8 +147,8 @@ public:
                   "variants!");
 #endif
 
-        auto fs = Thread::thread()->file_resolver();
-        fs::path file_path = fs->resolve(props.string("filename"));
+        auto fs = file_resolver();
+        fs::path file_path = fs->resolve(props.get<std::string_view>("filename"));
         std::string m_name = file_path.filename().string();
 
         // used for throwing an error later
@@ -227,7 +230,7 @@ public:
                 p[i] = string::strtof<InputFloat>(cur, (char **) &cur);
                 parse_error |= cur == orig;
             }
-            p = m_to_world.scalar().transform_affine(p);
+            p = m_to_world.scalar() * p;
 
             // Vertex radius
             InputFloat r;
@@ -325,11 +328,11 @@ public:
         initialize();
     }
 
-    void traverse(TraversalCallback *callback) override {
-        Base::traverse(callback);
-        callback->put_parameter("control_point_count", m_control_point_count, +ParamFlags::NonDifferentiable);
-        callback->put_parameter("segment_indices",     m_indices,             +ParamFlags::NonDifferentiable);
-        callback->put_parameter("control_points",      m_control_points,       ParamFlags::Differentiable | ParamFlags::Discontinuous);
+    void traverse(TraversalCallback *cb) override {
+        Base::traverse(cb);
+        cb->put("control_point_count", m_control_point_count, ParamFlags::NonDifferentiable);
+        cb->put("segment_indices",     m_indices,             ParamFlags::NonDifferentiable);
+        cb->put("control_points",      m_control_points,      ParamFlags::Differentiable | ParamFlags::Discontinuous);
     }
 
     void parameters_changed(const std::vector<std::string> &keys) override {
@@ -1070,7 +1073,7 @@ public:
         return oss.str();
     }
 
-    MI_DECLARE_CLASS()
+    MI_DECLARE_CLASS(BSplineCurve)
 
 private:
     template <bool Negate, size_t N>
@@ -1300,8 +1303,9 @@ private:
     mutable CUdeviceptr* m_vertex_buffer_ptr = nullptr;
     mutable CUdeviceptr* m_radius_buffer_ptr = nullptr;
 #endif
+
+    MI_TRAVERSE_CB(Base, m_curves_prim_idx, m_indices, m_control_points)
 };
 
-MI_IMPLEMENT_CLASS_VARIANT(BSplineCurve, Shape)
-MI_EXPORT_PLUGIN(BSplineCurve, "B-spline curve intersection primitive");
+MI_EXPORT_PLUGIN(BSplineCurve);
 NAMESPACE_END(mitsuba)

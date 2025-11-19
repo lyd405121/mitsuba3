@@ -85,7 +85,7 @@ Ellipsoids (:monosp:`ellipsoids`)
      an opacity value for each ellipsoids, or a set of spherical harmonic coefficients
      as used in the :monosp:`volprim_rf_basic` integrator.
 
-This shape plugin defines a a point cloud of anisotropic ellipsoid primitives
+This shape plugin defines a point cloud of anisotropic ellipsoid primitives
 using specified centers, scales, and quaternions. It employs a closed-form
 ray-intersection formula with backface culling. Although it is slower than the
 :monosp:`ellipsoidsmesh` shape plugin, which uses tessellated ellipsoids for
@@ -164,8 +164,8 @@ public:
         jit_free(m_host_bboxes);
     }
 
-    void traverse(TraversalCallback *callback) override {
-        m_ellipsoids.traverse(callback);
+    void traverse(TraversalCallback *cb) override {
+        m_ellipsoids.traverse(cb);
     }
 
     void parameters_changed(const std::vector<std::string> &keys) override {
@@ -219,14 +219,14 @@ public:
     //! @{ \name Attribute routines
     // =============================================================
 
-    Mask has_attribute(const std::string& name, Mask active) const override {
+    Mask has_attribute(std::string_view name, Mask active) const override {
         if (m_ellipsoids.has_attribute(name))
             return true;
 
         return Base::has_attribute(name, active);
     }
 
-    Float eval_attribute_1(const std::string& name,
+    Float eval_attribute_1(std::string_view name,
                            const SurfaceInteraction3f &si,
                            Mask active) const override {
         MI_MASK_ARGUMENT(active);
@@ -237,7 +237,7 @@ public:
         }
     }
 
-    Color3f eval_attribute_3(const std::string& name,
+    Color3f eval_attribute_3(std::string_view name,
                              const SurfaceInteraction3f &si,
                              Mask active) const override {
         MI_MASK_ARGUMENT(active);
@@ -248,7 +248,7 @@ public:
         }
     }
 
-    ArrayXf eval_attribute_x(const std::string& name,
+    ArrayXf eval_attribute_x(std::string_view name,
                              const SurfaceInteraction3f &si,
                              Mask active) const override {
         MI_MASK_ARGUMENT(active);
@@ -447,7 +447,47 @@ public:
         return oss.str();
     }
 
-    MI_DECLARE_CLASS()
+    void traverse_1_cb_ro(void *payload, dr::detail::traverse_callback_ro fn) const override {
+        // Only traverse the scene for frozen functions, since accidentally
+        // traversing the scene in loops or vcalls can cause errors with variable
+        // size mismatches, and backpropagation of gradients.
+        if (!jit_flag(JitFlag::EnableObjectTraversal))
+            return;
+
+        Object::traverse_1_cb_ro(payload, fn);
+        dr::traverse_1(this->traverse_1_cb_fields_(), [payload, fn](auto &x) {
+            dr::traverse_1_fn_ro(x, payload, fn);
+        });
+
+        dr::traverse_1_fn_ro(m_ellipsoids.data(), payload, fn);
+        dr::traverse_1_fn_ro(m_ellipsoids.extents_data(), payload, fn);
+        auto &attr_map = m_ellipsoids.attributes();
+        for (auto it = attr_map.begin(); it != attr_map.end(); ++it) {
+            dr::traverse_1_fn_ro(it.value(), payload, fn);
+        }
+    }
+
+    void traverse_1_cb_rw(void *payload, dr::detail::traverse_callback_rw fn) override {
+        // Only traverse the scene for frozen functions, since accidentally
+        // traversing the scene in loops or vcalls can cause errors with variable
+        // size mismatches, and backpropagation of gradients.
+        if (!jit_flag(JitFlag::EnableObjectTraversal))
+            return;
+
+        Object::traverse_1_cb_rw(payload, fn);
+        dr::traverse_1(this->traverse_1_cb_fields_(), [payload, fn](auto &x) {
+            dr::traverse_1_fn_rw(x, payload, fn);
+        });
+
+        dr::traverse_1_fn_rw(m_ellipsoids.data(), payload, fn);
+        dr::traverse_1_fn_rw(m_ellipsoids.extents_data(), payload, fn);
+        auto &attr_map = m_ellipsoids.attributes();
+        for (auto it = attr_map.begin(); it != attr_map.end(); ++it) {
+            dr::traverse_1_fn_rw(it.value(), payload, fn);
+        }
+    }
+
+    MI_DECLARE_CLASS(Ellipsoids)
 
 private:
 
@@ -520,6 +560,5 @@ private:
     void *m_device_bboxes = nullptr;
 };
 
-MI_IMPLEMENT_CLASS_VARIANT(Ellipsoids, Shape)
-MI_EXPORT_PLUGIN(Ellipsoids, "Ellipsoids");
+MI_EXPORT_PLUGIN(Ellipsoids)
 NAMESPACE_END(mitsuba)

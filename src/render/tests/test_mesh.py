@@ -18,8 +18,9 @@ def mixed_shapes_scene():
         "shape3": {
             "type" : "ply",
             "filename" : "resources/data/tests/ply/rectangle_uv.ply",
+            "flip_normals": True,
         },
-    }, parallel=False)
+    }, parallel=False, optimize=False)
 
 
 
@@ -510,7 +511,7 @@ def test15_differentiable_surface_interaction_params_forward(variants_all_ad_rgb
     params = mi.traverse(scene)
     shape_param_key = 'rect.vertex_positions'
     positions_buf = params[shape_param_key]
-    positions_initial = dr.unravel(mi.Point3f, positions_buf)
+    positions_initial = dr.unravel(mi.Point3f, mi.Float(positions_buf))
 
     # Create differential parameter to be optimized
     diff_vector = mi.Vector3f(0.0)
@@ -726,7 +727,7 @@ def test17_sticky_differentiable_surface_interaction_params_forward(variants_all
     params = mi.traverse(scene)
     shape_param_key = 'rect.vertex_positions'
     positions_buf = params[shape_param_key]
-    positions_initial = dr.unravel(mi.Point3f, positions_buf)
+    positions_initial = dr.unravel(mi.Point3f, mi.Float(positions_buf))
 
     # Create differential parameter to be optimized
     diff_vector = mi.Vector3f(0.0)
@@ -818,7 +819,7 @@ def test18_sticky_vcall_ad_fwd(variants_all_ad_rgb, res, wall, jit_flags):
     dr.set_label(theta, 'theta')
 
     # Attach object vertices to differential parameter
-    positions_initial = dr.unravel(mi.Point3f, params[key])
+    positions_initial = dr.unravel(mi.Point3f, mi.Float(params[key]))
     transform = mi.Transform4f().translate(mi.Vector3f(0.0, theta, 0.0))
     positions_new = transform @ positions_initial
     positions_new = dr.ravel(positions_new)
@@ -869,7 +870,7 @@ def test19_update_geometry(variants_vec_rgb):
 
     params = mi.traverse(scene)
 
-    init_vertex_pos = dr.unravel(mi.Point3f, params['rect.vertex_positions'])
+    init_vertex_pos = dr.unravel(mi.Point3f, mi.Float(params['rect.vertex_positions']))
 
     def translate(v):
         transform = mi.Transform4f().translate(mi.Vector3f(v))
@@ -1204,7 +1205,7 @@ def test30_differential_motion(variants_vec_rgb):
     theta = mi.Point3f(0.0)
     dr.enable_grad(theta)
     key = 'vertex_positions'
-    positions = dr.unravel(mi.Point3f, params[key])
+    positions = dr.unravel(mi.Point3f, mi.Float(params[key]))
     translation = mi.Transform4f().translate([theta.x, 2 * theta.y, 3 * theta.z])
     positions = translation @ positions
     params[key] = dr.ravel(positions)
@@ -1280,7 +1281,7 @@ def test33_rebuild_area_pmf(variants_vec_rgb):
     params = mi.traverse(mesh)
     key = 'vertex_positions'
 
-    vertices = dr.unravel(mi.Point3f, params[key])
+    vertices = dr.unravel(mi.Point3f, mi.Float(params[key]))
     new_vertices = mi.Transform4f().scale(2) @ vertices
     params[key] = dr.ravel(new_vertices)
     params.update()
@@ -1312,6 +1313,17 @@ def test34_mesh_ptr(variants_vec_rgb):
     is_nnz = dr.reinterpret_array(mi.UInt32, meshes) != 0
     assert dr.all(is_nnz == (True, False, True))
 
+    # It should be possible to construct an empty MeshPtr.
+    assert dr.width(mi.ShapePtr()) == 0
+    assert dr.width(mi.MeshPtr()) == 0
+    assert dr.width(dr.zeros(mi.MeshPtr, 0)) == 0
+    assert dr.width(dr.empty(mi.MeshPtr, 0)) == 0
+
+    # It should be possible to reshape down to zero elements.
+    a = dr.zeros(mi.MeshPtr, 4)
+    b = dr.reshape(mi.MeshPtr, a, 0, shrink=True)
+    assert dr.width(b) == 0
+
 
 @fresolver_append_path
 def test35_mesh_vcalls(variants_vec_rgb):
@@ -1337,6 +1349,7 @@ def test35_mesh_vcalls(variants_vec_rgb):
     assert dr.all(meshes.has_vertex_texcoords() == active)
     assert not dr.any(meshes.has_mesh_attributes())
     assert not dr.any(meshes.has_face_normals())
+    assert dr.all(meshes.has_flipped_normals() == [False, False, True])
 
     idx = mi.UInt32([0, 99, 1])
     face_idx = meshes.face_indices(idx, active=active)
@@ -1370,3 +1383,75 @@ def test35_mesh_vcalls(variants_vec_rgb):
                       == sh.face_normal(idx_i))
         assert dr.all(dr.gather(type(opposite), opposite, i)
                       == sh.opposite_dedge(idx_i))
+
+
+@fresolver_append_path
+def test36_mesh_vcalls_with_directed_edges(variants_vec_rgb):
+    """
+    Test a special case where some meshes have their E2E data structure
+    initialized and others don't. Virtual function calls involving only
+    the initialized meshes should work.
+    """
+    scene = mi.load_dict({
+        "type": "scene",
+        "mesh1": {
+            "type": "ply",
+            "filename": "resources/data/tests/ply/cbox_smallbox.ply",
+        },
+        "mesh2": {
+            "type": "ply",
+            "filename": "resources/data/tests/ply/cbox_smallbox.ply",
+        },
+    })
+
+    # Second mesh will *not* have a valid E2E data structure.
+    mesh_ptr = dr.gather(mi.MeshPtr, scene.shapes_dr(), dr.zeros(mi.UInt32, 3))
+    mesh_ptr[0].build_directed_edges()
+
+    result = mesh_ptr.opposite_dedge(mi.UInt32([2, 3, 2]))
+    assert dr.all(result == mi.UInt32([3, 2, 3]))
+
+
+def test37_create_mesh_with_properties(variant_scalar_rgb):
+    m = mi.Mesh(mi.Properties())
+    assert str(m) == """Mesh[
+  name = "",
+  bbox = BoundingBox3f[invalid],
+  vertex_count = 0,
+  vertices = [0 B of vertex data],
+  face_count = 0,
+  faces = [0 B of face data],
+  face_normals = 0
+]"""
+
+def test38_ray_intersect_triangle(variants_all_rgb):
+    mesh = mi.Mesh(name='', vertex_count=3, face_count=1)
+    params = mi.traverse(mesh)
+    params['vertex_positions'] = [
+        0.0, 0.0, 0.0, 
+        1.0, 0.0, 0.0,
+        0.5, 1.0, 0.0,
+    ]
+    params['faces'] = [0, 1, 2]
+    params.update()
+
+    ray = mi.Ray3f([0.5, 0.5, 1.0], [0.0, 0.0, -1.0])
+
+    pi = mesh.ray_intersect_triangle(mi.UInt32(0), ray)
+    assert dr.all(dr.abs(pi.t - 1) <= 1e-12)
+    assert dr.all(pi.prim_index == 0)
+
+def test39_custom_vertex_normals(variants_vec_rgb):
+    m = mi.Mesh(mi.Properties())
+    normals = dr.linspace(mi.Float, -1, 1, 12)
+    params = mi.traverse(m)
+    params['vertex_positions'] = [0.0, 0.0, 0.0,
+                                  1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0]
+    params['faces'] = [0, 1, 2, 1, 2, 3]
+    params['vertex_normals'] = normals
+    params.update()
+    assert m.has_vertex_normals()
+    params = mi.traverse(m)
+
+    # The custom vertex normals should not have been modified.
+    assert dr.allclose(params['vertex_normals'], normals)

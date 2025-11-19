@@ -18,60 +18,48 @@
 
 NAMESPACE_BEGIN(mitsuba)
 
-MI_VARIANT Shape<Float, Spectrum>::Shape(const Properties &props) : m_id(props.id()) {
+MI_VARIANT Shape<Float, Spectrum>::Shape(const Properties &props)
+    : JitObject<Shape>(props.id()) {
     m_to_world =
-        (ScalarTransform4f) props.get<ScalarTransform4f>("to_world", ScalarTransform4f());
-    m_to_object = m_to_world.scalar().inverse();
+        (ScalarAffineTransform4f) props.get<ScalarAffineTransform4f>("to_world", ScalarAffineTransform4f());
 
-    for (auto &[name, obj] : props.objects(false)) {
-        Emitter *emitter = dynamic_cast<Emitter *>(obj.get());
-        Sensor *sensor   = dynamic_cast<Sensor *>(obj.get());
-        BSDF *bsdf       = dynamic_cast<BSDF *>(obj.get());
-        Medium *medium   = dynamic_cast<Medium *>(obj.get());
-        Texture *texture = dynamic_cast<Texture *>(obj.get());
-
-        if (emitter) {
+    for (auto &prop : props.objects()) {
+        if (Emitter *emitter = prop.try_get<Emitter>()) {
             if (m_emitter)
                 Throw("Only a single Emitter child object can be specified per shape.");
             m_emitter = emitter;
-        } else if (sensor) {
+        } else if (Sensor *sensor = prop.try_get<Sensor>()) {
             if (m_sensor)
                 Throw("Only a single Sensor child object can be specified per shape.");
             m_sensor = sensor;
-        } else if (bsdf) {
+        } else if (BSDF *bsdf = prop.try_get<BSDF>()) {
             if (m_bsdf)
                 Throw("Only a single BSDF child object can be specified per shape.");
             m_bsdf = bsdf;
-        } else if (medium) {
-            if (name == "interior") {
+        } else if (Medium *medium = prop.try_get<Medium>()) {
+            if (prop.name() == "interior") {
                 if (m_interior_medium)
                     Throw("Only a single interior medium can be specified per shape.");
                 m_interior_medium = medium;
-            } else if (name == "exterior") {
+            } else if (prop.name() == "exterior") {
                 if (m_exterior_medium)
                     Throw("Only a single exterior medium can be specified per shape.");
                 m_exterior_medium = medium;
             }
-        } else if (texture) {
-            add_texture_attribute(name, texture);
-        } else {
-            continue;
+        } else if (Texture *texture = prop.try_get<Texture>()) {
+            add_texture_attribute(prop.name(), texture);
         }
-
-        props.mark_queried(name);
     }
 
     // Create a default diffuse BSDF if needed.
     if (!m_bsdf) {
         Properties props2("diffuse");
         if (m_emitter)
-            props2.set_float("reflectance", 0);
+            props2.set("reflectance", 0.f);
         m_bsdf = PluginManager::instance()->create_object<BSDF>(props2);
     }
 
     m_silhouette_sampling_weight = props.get<ScalarFloat>("silhouette_sampling_weight", 1.0f);
-
-    MI_REGISTRY_PUT("Shape", this);
 }
 
 MI_VARIANT Shape<Float, Spectrum>::~Shape() {
@@ -79,10 +67,8 @@ MI_VARIANT Shape<Float, Spectrum>::~Shape() {
     if constexpr (dr::is_cuda_v<Float>)
         jit_free(m_optix_data_ptr);
 #endif
-
-    if constexpr (dr::is_jit_v<Float>)
-        jit_registry_remove(this);
 }
+
 
 MI_VARIANT typename Shape<Float, Spectrum>::PositionSample3f
 Shape<Float, Spectrum>::sample_position(Float /*time*/, const Point2f & /*sample*/,
@@ -338,7 +324,7 @@ void Shape<Float, Spectrum>::optix_fill_hitgroup_records(
 MI_VARIANT void Shape<Float, Spectrum>::optix_prepare_ias(const OptixDeviceContext& /*context*/,
                                                            std::vector<OptixInstance>& /*instances*/,
                                                            uint32_t /*instance_id*/,
-                                                           const ScalarTransform4f& /*transf*/) {
+                                                           const ScalarAffineTransform4f& /*transf*/) {
     NotImplementedError("optix_prepare_ias");
 }
 
@@ -502,30 +488,30 @@ Shape<Float, Spectrum>::ray_intersect(const Ray3f &ray, uint32_t ray_flags, Mask
 }
 
 MI_VARIANT void
-Shape<Float, Spectrum>::add_texture_attribute(const std::string& name, Texture *texture) {
+Shape<Float, Spectrum>::add_texture_attribute(std::string_view name, Texture *texture) {
     // Replaces existing attribute with name `name`, if any.
-    m_texture_attributes.insert_or_assign(name, texture);
+    m_texture_attributes.insert_or_assign(std::string(name), texture);
 }
 
 MI_VARIANT typename Shape<Float, Spectrum>::Texture *
-Shape<Float, Spectrum>::texture_attribute(const std::string &name) {
+Shape<Float, Spectrum>::texture_attribute(std::string_view name) {
     auto it = m_texture_attributes.find(name);
     if (it == m_texture_attributes.end())
-        Throw("texture_attribute(): attribute %s doesn't exist.", name.c_str());
-    return it->second.get();
+        Throw("texture_attribute(): attribute %s doesn't exist.", name);
+    return const_cast<Texture*>(it->second.get());
 }
 
 MI_VARIANT const typename Shape<Float, Spectrum>::Texture *
-Shape<Float, Spectrum>::texture_attribute(const std::string &name) const {
+Shape<Float, Spectrum>::texture_attribute(std::string_view name) const {
     const auto it = m_texture_attributes.find(name);
     if (it == m_texture_attributes.end())
-        Throw("texture_attribute(): attribute %s doesn't exist.", name.c_str());
+        Throw("texture_attribute(): attribute %s doesn't exist.", name);
     return it->second.get();
 }
 
 
 MI_VARIANT void
-Shape<Float, Spectrum>::remove_attribute(const std::string& name) {
+Shape<Float, Spectrum>::remove_attribute(std::string_view name) {
     const auto& it = m_texture_attributes.find(name);
     if (it == m_texture_attributes.end())
         Throw("remove_attribute(): Attribute \"%s\" not found.", name);
@@ -533,12 +519,12 @@ Shape<Float, Spectrum>::remove_attribute(const std::string& name) {
 }
 
 MI_VARIANT typename Shape<Float, Spectrum>::Mask
-Shape<Float, Spectrum>::has_attribute(const std::string& name, Mask /*active*/) const {
+Shape<Float, Spectrum>::has_attribute(std::string_view name, Mask /*active*/) const {
     return m_texture_attributes.find(name) != m_texture_attributes.end();
 }
 
 MI_VARIANT typename Shape<Float, Spectrum>::UnpolarizedSpectrum
-Shape<Float, Spectrum>::eval_attribute(const std::string & name,
+Shape<Float, Spectrum>::eval_attribute(std::string_view name,
                                        const SurfaceInteraction3f & si,
                                        Mask active) const {
     const auto& it = m_texture_attributes.find(name);
@@ -546,7 +532,7 @@ Shape<Float, Spectrum>::eval_attribute(const std::string & name,
         if constexpr (dr::is_jit_v<Float>)
             return 0.f;
         else
-            Throw("Invalid attribute requested %s.", name.c_str());
+            Throw("Invalid attribute requested %s.", name);
     }
 
     const auto& texture = it->second;
@@ -554,7 +540,7 @@ Shape<Float, Spectrum>::eval_attribute(const std::string & name,
 }
 
 MI_VARIANT Float
-Shape<Float, Spectrum>::eval_attribute_1(const std::string& name,
+Shape<Float, Spectrum>::eval_attribute_1(std::string_view name,
                                          const SurfaceInteraction3f &si,
                                          Mask active) const {
     const auto& it = m_texture_attributes.find(name);
@@ -562,7 +548,7 @@ Shape<Float, Spectrum>::eval_attribute_1(const std::string& name,
         if constexpr (dr::is_jit_v<Float>)
             return 0.f;
         else
-            Throw("Invalid attribute requested %s.", name.c_str());
+            Throw("Invalid attribute requested %s.", name);
     }
 
     const auto& texture = it->second;
@@ -570,7 +556,7 @@ Shape<Float, Spectrum>::eval_attribute_1(const std::string& name,
 }
 
 MI_VARIANT typename Shape<Float, Spectrum>::Color3f
-Shape<Float, Spectrum>::eval_attribute_3(const std::string& name,
+Shape<Float, Spectrum>::eval_attribute_3(std::string_view name,
                                          const SurfaceInteraction3f &si,
                                          Mask active) const {
     const auto& it = m_texture_attributes.find(name);
@@ -578,7 +564,7 @@ Shape<Float, Spectrum>::eval_attribute_3(const std::string& name,
         if constexpr (dr::is_jit_v<Float>)
             return 0.f;
         else
-            Throw("Invalid attribute requested %s.", name.c_str());
+            Throw("Invalid attribute requested %s.", name);
     }
 
     const auto& texture = it->second;
@@ -586,7 +572,7 @@ Shape<Float, Spectrum>::eval_attribute_3(const std::string& name,
 }
 
 MI_VARIANT typename dr::DynamicArray<Float>
-Shape<Float, Spectrum>::eval_attribute_x(const std::string& /*name*/,
+Shape<Float, Spectrum>::eval_attribute_x(std::string_view /*name*/,
                                          const SurfaceInteraction3f & /*si*/,
                                          Mask /*active*/) const {
     if constexpr (dr::is_jit_v<Float>)
@@ -626,21 +612,25 @@ Shape<Float, Spectrum>::effective_primitive_count() const {
     return primitive_count();
 }
 
-MI_VARIANT void Shape<Float, Spectrum>::traverse(TraversalCallback *callback) {
-    callback->put_object("bsdf", m_bsdf.get(), +ParamFlags::Differentiable);
+MI_VARIANT bool Shape<Float, Spectrum>::has_flipped_normals() const {
+    return false;
+}
+
+MI_VARIANT void Shape<Float, Spectrum>::traverse(TraversalCallback *cb) {
+    cb->put("bsdf", m_bsdf, ParamFlags::Differentiable);
     if (m_emitter)
-        callback->put_object("emitter",         m_emitter.get(),         +ParamFlags::Differentiable);
+        cb->put("emitter",         m_emitter,         ParamFlags::Differentiable);
     if (m_sensor)
-        callback->put_object("sensor",          m_sensor.get(),          +ParamFlags::Differentiable);
+        cb->put("sensor",          m_sensor,          ParamFlags::Differentiable);
     if (m_interior_medium)
-        callback->put_object("interior_medium", m_interior_medium.get(), +ParamFlags::Differentiable);
+        cb->put("interior_medium", m_interior_medium, ParamFlags::Differentiable);
     if (m_exterior_medium)
-        callback->put_object("exterior_medium", m_exterior_medium.get(), +ParamFlags::Differentiable);
+        cb->put("exterior_medium", m_exterior_medium, ParamFlags::Differentiable);
 
-    callback->put_parameter("silhouette_sampling_weight", m_silhouette_sampling_weight, +ParamFlags::NonDifferentiable);
+    cb->put("silhouette_sampling_weight", m_silhouette_sampling_weight, ParamFlags::NonDifferentiable);
 
-    for (auto& [name, texture]: m_texture_attributes)
-        callback->put_object(name, texture.get(), +ParamFlags::Differentiable);
+    for (auto it = m_texture_attributes.begin(); it != m_texture_attributes.end(); ++it)
+        cb->put(it.key(), it.value(), ParamFlags::Differentiable);
 }
 
 MI_VARIANT
@@ -650,8 +640,8 @@ void Shape<Float, Spectrum>::parameters_changed(const std::vector<std::string> &
             bool is_bspline_curve = shape_type() == +ShapeType::BSplineCurve,
                  is_linear_curve  = shape_type() == +ShapeType::LinearCurve;
 
-            if (!is_mesh() && !is_bspline_curve && !is_linear_curve) // to_world/to_object is used
-                dr::make_opaque(m_to_world, m_to_object);
+            if (!is_mesh() && !is_bspline_curve && !is_linear_curve) // to_world is used
+                dr::make_opaque(m_to_world);
         }
 
         if (m_emitter)
@@ -676,8 +666,8 @@ MI_VARIANT void Shape<Float, Spectrum>::initialize() {
         bool is_bspline_curve = shape_type() == +ShapeType::BSplineCurve,
              is_linear_curve  = shape_type() == +ShapeType::LinearCurve;
 
-        if (!is_mesh() && !is_bspline_curve && !is_linear_curve) // to_world/to_object is not used
-            dr::make_opaque(m_to_world, m_to_object);
+        if (!is_mesh() && !is_bspline_curve && !is_linear_curve) // to_world is not used
+            dr::make_opaque(m_to_world);
     }
 
     // Explicitly register this shape as the parent of the provided sub-objects
@@ -714,6 +704,6 @@ MI_VARIANT std::string Shape<Float, Spectrum>::get_children_string() const {
     return oss.str();
 }
 
-MI_IMPLEMENT_CLASS_VARIANT(Shape, Object, "shape")
+MI_IMPLEMENT_TRAVERSE_CB(Shape, Object);
 MI_INSTANTIATE_CLASS(Shape)
 NAMESPACE_END(mitsuba)
